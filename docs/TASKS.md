@@ -50,7 +50,7 @@ Global rules:
 
 ## Phase 1 — Scoring core (1.5–2 days, GPU)
 
-- [ ] **P1.1 Model loader** (`model_loader.py`): backbone `unsloth/gemma-3-1b-it-unsloth-bnb-4bit`
+- [x] **P1.1 Model loader** (`model_loader.py`): backbone `unsloth/gemma-3-1b-it-unsloth-bnb-4bit`
       (the training checkpoint — NOT plain google/gemma-3-1b-it fp16 as the legacy Evaluation
       notebook did) + the 3 Hub adapters `fyp-gemma3-1b-slm-a/b/c-qlora` (private; HF_TOKEN),
       all memory-resident. Seed loading code from `Final_Inference_Pipeline.ipynb`.
