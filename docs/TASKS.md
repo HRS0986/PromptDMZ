@@ -24,18 +24,22 @@ Global rules:
       AC: `uv sync` builds the local env and `uv run python -c "import src"` succeeds; a fresh
       Kaggle session runs the notebook install cell and imports `src` cleanly on top of platform
       torch; pinned versions match the working-notebook versions.
-- [x] **P0.2 Template handling** (`src/templates.py`) — NOTE: datasets use deliberate template
-      VARIATION (EDA.ipynb), so there is no single canonical template. Implement:
+- [x] **P0.2 Template handling** (`src/templates.py`) — CORRECTED: there is NO template variation.
+      The deployed datasets carry exactly ONE template per adapter, verified across all 230,992
+      rows of `fyp-slm-a/b/c`. The earlier "deliberate VARIATION" note was taken from `EDA.ipynb`,
+      which is stale — it built a different corpus (`slm-shield-ds-*`). Implement:
       (i) `get_prompt_without_answer(formatted_text)` — answer-strip stored rows by splitting on
-      `<start_of_turn>model` (the scoring path for ALL split evaluations);
+      the LAST `<start_of_turn>model` (attacker prompts can contain the marker; first-occurrence
+      splitting silently truncates them) — the scoring path for ALL split evaluations;
       (ii) `extract_raw_prompt(formatted_text)` — recover the raw user prompt IF the Hub datasets
       lack a raw `text` column (verify first; needed for tokenizer stats + cross-adapter scoring);
-      (iii) `build_prompt(prompt, adapter)` — ONE frozen representative variant per adapter
-      (highest-frequency variant in the training split; document the choice) for live inference.
-      AC: golden tests freeze the three chosen variants; answer-strip test asserts no label token
+      (iii) `build_prompt(prompt, adapter)` — the single frozen deployed template per adapter, for
+      live inference and cross-adapter scoring.
+      AC: golden tests freeze the three per-adapter templates AND assert on real rows that no
+      second variant exists; answer-strip test asserts no label token
       after the model-turn marker on 1 000 sampled rows; raw-prompt extractor round-trips on
       1 000 sampled rows (or the raw column is confirmed and the extractor is skipped).
-- [ ] **P0.3 Unified splits + manifests**: pull the three Hub datasets (`hirushafernando/fyp-slm-a`,
+- [x] **P0.3 Unified splits + manifests**: pull the three Hub datasets (`hirushafernando/fyp-slm-a`,
       `fyp-slm-b`, `fyp-slm-c`); build UNIFIED-VAL (union of validation splits) and UNIFIED-TEST (union of test
       splits) with source-category tags; exact-text dedup within each union AND across the
       VAL/TEST boundary (drop colliders from VAL, log counts — shared benign pools make
@@ -55,9 +59,16 @@ Global rules:
 - [ ] **P1.2 Batched scorer** (`scoring.py`): label-token id derivation (empirical, logged),
       batched forward with `adapter_names`, last-non-pad logit extraction (left padding),
       two-way softmax → (p_raw, d) per adapter; sequential `set_adapter` fallback path.
+      Label ids MUST be derived empirically — tokenize real rows and diff against the tokenized
+      prompt prefix, never tokenize the bare label word: the prompt ends in `\n` + 8 spaces, which
+      SentencePiece may merge with the following label word, so the first token of `INJECTION`
+      in context need not equal its first token in isolation (`templates.label_context()` supplies
+      the context).
       AC: **batched vs sequential probabilities agree within fp16 tolerance (max |Δp| < 1e-3)
-      on ≥200 prompts** — this test gates everything downstream. Label ids: INJ_ID ≠ BEN_ID,
-      both asserted stable across 3 template variants of the same prompt (per adapter).
+      on ≥200 prompts** — this test gates everything downstream. Label ids: INJ_ID ≠ BEN_ID, both
+      stable across ≥100 sampled real rows per adapter, and the derived ids logged. Expect them
+      identical across all three adapters (the context preceding the label is byte-identical) —
+      if not, stop and investigate rather than proceeding.
 - [ ] **P1.3 Legacy agreement check**: run new scorer + the legacy generate-parse pipeline
       (reuse `Final_Inference_Pipeline.ipynb`'s predict functions verbatim as the comparator)
       on the same labelled sample (n≈500), both on the 4-bit backbone.
@@ -65,8 +76,10 @@ Global rules:
       output — record the legacy parse-failure rate (this number goes in the thesis).
 - [ ] **P1.4 Bulk scoring runs**: score T, F, C splits (NOT test) with resumable writer. Input =
       each row's own answer-stripped `formatted_text` for the row's home adapter, plus the frozen
-      variants (P0.2 iii) wrapping the raw prompt for the other two adapters (cross-adapter
-      scoring — every row gets all three probabilities).
+      templates (P0.2 iii) wrapping the raw prompt for the other two adapters (cross-adapter
+      scoring — every row gets all three probabilities). Since there is exactly one template per
+      adapter, both paths produce byte-identical strings — `templates.assert_modes_agree()` is the
+      regression test, so cross-adapter scoring is exact rather than approximate.
       AC: parquet per split with columns [prompt_hash, split, label, category, d1..d3, p1..p3];
       resume-after-kill test passes; files on Drive.
 

@@ -269,15 +269,7 @@ def test_both_scoring_modes_agree(adapter, prompt):
 # AC on 1 000 real rows — requires the private Hub datasets
 # --------------------------------------------------------------------------------------
 
-def _load_token() -> str | None:
-    token = os.environ.get("HF_TOKEN")
-    if token:
-        return token
-    try:
-        from dotenv import dotenv_values
-    except ImportError:
-        return None
-    return dotenv_values(".env").get("HF_TOKEN")
+from tests.conftest import load_hf_token as _load_token
 
 
 requires_hub = pytest.mark.skipif(
