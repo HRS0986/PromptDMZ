@@ -69,8 +69,13 @@ Treat both as the source of truth. If a request conflicts with them, say so and 
    implementations caused silent accuracy loss; never reintroduce ad-hoc templating in notebooks or
    elsewhere.
 2. **No label leakage.** Never score a string containing the answer. Score stored rows via
-   `get_prompt_without_answer()` (split on `<start_of_turn>model`); templates end at
-   `<start_of_turn>model\n` with no answer text.
+   `get_prompt_without_answer()` (split on the LAST `<start_of_turn>model` — attacker prompts
+   can contain the marker); templates end at `<start_of_turn>model` + `"\n" + 8 spaces`, with
+   no answer text, so the next predicted token is the label word rather than whitespace.
+   The exact frozen format is verified against 230,992/230,992 deployed rows — see
+   `src/templates.py`. Do NOT re-derive templates from `EDA.ipynb`: it is stale and built a
+   different corpus (`slm-shield-ds-*`, 50/50 balance) than the one the adapters were trained
+   on (`fyp-slm-*`, 75/25).
 3. **The test split (UNIFIED-TEST) is sealed until Phase 7** and used exactly once. No fitting,
    tuning, or peeking on test data. Fitting order is rigid: calibration (C6) → fusion (C7) →
    conformal (C8).

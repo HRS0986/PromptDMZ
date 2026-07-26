@@ -24,7 +24,7 @@ Global rules:
       AC: `uv sync` builds the local env and `uv run python -c "import src"` succeeds; a fresh
       Kaggle session runs the notebook install cell and imports `src` cleanly on top of platform
       torch; pinned versions match the working-notebook versions.
-- [ ] **P0.2 Template handling** (`src/templates.py`) — NOTE: datasets use deliberate template
+- [x] **P0.2 Template handling** (`src/templates.py`) — NOTE: datasets use deliberate template
       VARIATION (EDA.ipynb), so there is no single canonical template. Implement:
       (i) `get_prompt_without_answer(formatted_text)` — answer-strip stored rows by splitting on
       `<start_of_turn>model` (the scoring path for ALL split evaluations);
