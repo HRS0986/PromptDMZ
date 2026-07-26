@@ -95,11 +95,15 @@ Global rules:
       → shape (7,); versioned layout constant; NOTHING else hardcodes feature width.
       AC: unit test on shape/ordering; grep-level check that no other module indexes features
       positionally.
-- [ ] **P4.2 Three fusers**: noisy-OR (learned q, probs-only), LR (7 feats), MLP (8–16 hidden,
-      early stopping) trained on F-split; internal CV for hyperparams.
+- [ ] **P4.2 Three fusers**: noisy-OR (learned q, probs-only — 3 params), LR (all 7 feats,
+      standardised — 8 params), MLP (8–16 hidden, early stopping) trained on F-split; internal CV
+      for hyperparams. **Variant selection is by TPR@1%FPR** under F-split CV (the headline metric),
+      tie-broken on AUROC — never select on a different metric than the one reported.
       AC: each trains in <60 s CPU; artefacts persisted; noisy-OR with q=1 + 0.5 thresholds
-      reproduces the OR-gate decision exactly (regression test — this IS the baseline link);
-      LR weights logged (expect privilege-escalation down-weighted — note either way).
+      reproduces conventional rule-based (probabilistic-OR) fusion exactly (regression test — this
+      IS the baseline link: the baseline is the constrained q=1 case, not a separate system);
+      LR weights logged (expect privilege-escalation down-weighted — note either way);
+      parameter count of each fuser recorded for the efficiency table.
 - [ ] **P4.3 Uncalibrated ablation twin**: same fusers trained on raw p (config (c) of the
       evaluation matrix).
       AC: artefacts saved under distinct names; no shared scaler with the calibrated variant.
@@ -107,13 +111,14 @@ Global rules:
 ## Phase 5 — Conformal (0.5 day, CPU)
 
 - [ ] **P5.1 Threshold** (`conformal.py`): benign C-split scores through the selected fuser;
-      k = ceil((1−α)(n+1)); τ̂ = k-th smallest; α=0.05 default, α sweep {0.01, 0.05, 0.1}.
+      k = ceil((1−α)(n+1)); τ̂ = k-th smallest; **headline α=0.01** (aligns with the TPR@1%FPR
+      headline metric), α sweep {0.01, 0.05, 0.10}.
       AC: unit test of the quantile rule on synthetic data (analytic check); `conformal.json`
       records n, α, τ̂, fuser id + artefact hashes (threshold invalid if fuser changes).
 - [ ] **P5.2 Bound sanity**: empirical FPR of τ̂ on C-split itself ≤ α by construction (test);
       document that the real check is TEST FPR vs α in Phase 7.
 
-## Phase 6 — Baselines (0.5 day, GPU for scoring only — NO training)
+## Phase 6 — Baselines & evaluation assets (1.5–2 days; GPU for scoring only — NO adapter training)
 
 - [ ] **P6.1 Baseline adapter — ALREADY TRAINED, just load + score**: the merged/generalist adapter
       `hirushafernando/fyp-gemma3-1b-slm-merged-qlora` exists (built by `FT_Merged_Adapter.ipynb`,
@@ -123,26 +128,72 @@ Global rules:
       AC: baseline scored on F-split with the new scoring path; NO retraining performed.
       Hyperparameters (r=16, α=16) are confirmed identical to the specialists, so the
       specialist-vs-generalist comparison is properly controlled.
-- [ ] **P6.2 OR-gate baseline**: raw p_i > 0.5 OR, on the new scoring path.
-      AC: reproduced via the noisy-OR regression test path (P4.2); plus sequential-with-early-exit
-      latency variant implemented for the latency table.
+- [ ] **P6.2 Conventional rule-based fusion baseline** (config (b), literature-standard disjunctive
+      fusion — cite MoJE / WAInjectBench; do NOT describe it as "the previous architecture"):
+      (b1) probabilistic-OR `S = 1 − Π(1 − p_i)` on uncalibrated probs — natively continuous;
+      (b2) hard rule `any p_i > τ` with **shared τ swept 0→1** for its ROC curve;
+      (b3) optional strong variant with per-adapter τ optimised on F-split.
+      Plus the sequential-with-early-exit latency variant for the efficiency table.
+      AC: (b1) reproduced via the noisy-OR q=1 regression test (P4.2); (b2) produces a full ROC
+      curve — a single fixed τ=0.5 point is NOT acceptable as a matched-FPR comparison; operating
+      point for the headline number selected on F/C-split, not on test.
+- [ ] **P6.3 Perplexity + LightGBM baseline** (config (g), `eval/baselines.py`): GPT-2 (small)
+      windowed perplexity features → LightGBM, fitted on F-split ONLY.
+      AC: fits on F-split, scores F-split held-out portion; GPT-2 load does not exceed T4 budget
+      alongside nothing else (run standalone); artefact persisted; cite Alon & Kamfonas.
+- [ ] **P6.4 TF-IDF + RF/LR baseline** (config (h), `eval/baselines.py`): word+char TF-IDF →
+      RandomForest and LogisticRegression, fitted on F-split ONLY. **First thing to cut if time is short.**
+      AC: CPU-only; fits in <5 min; artefacts persisted; cite Shaheer et al.
+- [ ] **P6.5 Benign stress set** (`data/benign_stress_set.jsonl`, tier 3): hand-author ~100–300
+      all-benign prompts containing trigger vocabulary in innocuous contexts (e.g. "ignore the
+      previous paragraph", RBAC/permission discussions, base64 explained in a tutorial, code with
+      `sudo`/`admin` identifiers, security-course questions). Freeze BEFORE Phase 7.
+      AC: file committed with a provenance note (author, date, design rationale per item category);
+      every row labelled benign; no overlap with any split (hash check); NOT used for any fitting.
+- [ ] **P6.6 External benchmark loader** (`eval/external.py`, tier 2): load Open-Prompt-Injection
+      (preferred) or deepset `prompt-injections`; map to binary INJECTION/BENIGN.
+      AC: mapping documented in the module docstring incl. any task types dropped and why; row
+      counts + class balance logged; loader is read-only and fits nothing.
 
-## Phase 7 — Final evaluation (1–1.5 days; TEST touched here ONLY)
+## Phase 7 — Final evaluation (1.5–2 days; ALL test-tier data touched here ONLY)
 
-- [ ] **P7.1 Test scoring**: single bulk run of UNIFIED-TEST through the scorer (+ generalist).
-      AC: output tagged with split name + manifest hash; **val-vs-test output distinguishability
-      check**: assert test metrics are not bit-identical to any F/C-split metrics file (guards
-      the duplicated-run failure mode seen previously).
-- [ ] **P7.2 Full matrix** (`run_eval.py`): configs (a)–(f) × all metrics of ARCHITECTURE §4,
-      including per-category recall, cross-category leakage matrix, ECE table, certified-α vs
-      observed-FPR comparison, latency (batched vs sequential vs legacy generate) and peak VRAM.
+- [ ] **P7.1 Test scoring (all three tiers)**: single bulk run through the scorer for
+      UNIFIED-TEST (tier 1), the external benchmark (tier 2), and the benign stress set (tier 3),
+      for the specialists AND the merged baseline. Decision-layer artefacts applied READ-ONLY —
+      no re-fitting, no re-thresholding on any tier.
+      AC: outputs tagged with tier + manifest hash; **val-vs-test distinguishability check**:
+      assert test metrics are not bit-identical to any F/C-split metrics file (guards the
+      duplicated-run failure mode seen previously); tier-3 rows are all benign as authored.
+- [ ] **P7.2 Full matrix** (`run_eval.py`): configs (a)–(h) × §4.3 metrics, per tier.
+      Primary: Precision, Recall, F1, AUROC, **TPR@1%FPR (headline)**, benign FPR reported
+      separately. Accuracy appendix-only. Plus ECE (pre/post, per adapter) + reliability diagrams,
+      conformal empirical coverage (does α hold on tiers 1 and 3?), per-category recall,
+      cross-category leakage matrix, legacy parse-failure rate.
       AC: one machine-readable results.json + rendered markdown tables + reliability/ROC plots;
-      every number traceable to an artefact hash.
-- [ ] **P7.3 Results narrative check**: verify the three headline claims are supported or
-      honestly reported as negative: (i) learned fusion vs OR-gate at matched recall,
-      (ii) specialists+fusion vs generalist, (iii) observed test FPR ≤ certified α.
-      AC: a short RESULTS_SUMMARY.md stating each claim with its number — negative results are
-      recorded, not hidden.
+      every number traceable to an artefact hash; TPR@1%FPR computed by threshold sweep on the
+      score distribution (document the interpolation rule).
+- [ ] **P7.3 Bootstrap confidence intervals** (`eval/bootstrap.py`): 1,000 **stratified** resamples
+      of the saved test predictions; 95% CIs on F1 and TPR@1%FPR for every configuration and tier.
+      CPU only — no GPU, no re-scoring. 3 seeds additionally if compute allows.
+      Two mandatory implementation details: (i) resample benign and attack pools SEPARATELY, each
+      to original size (fixes the FPR denominator); (ii) RECOMPUTE the 1%-FPR threshold inside each
+      replicate — the threshold's tail sensitivity is the dominant variance source, and fixing it
+      understates the CI.
+      AC: CI reported alongside every headline number; explicit statement of whether the
+      specialist-vs-generalist gap and the learned-fusion-vs-rule-based gap exceed their CIs.
+- [ ] **P7.4 Efficiency benchmark**: peak VRAM (`torch.cuda.max_memory_allocated`), **median and
+      p95** latency per prompt, batched-vs-sequential throughput, parameter counts (adapters vs
+      decision layer). All in ONE T4 session so numbers are mutually comparable.
+      AC: single results table; session/GPU model recorded; batched and sequential measured on the
+      same prompt set.
+- [ ] **P7.5 Results narrative check**: verify the headline claims are supported or honestly
+      reported as negative — (i) calibrated fusion vs conventional rule-based fusion at 1% FPR,
+      (ii) specialists+fusion
+      vs merged baseline, (iii) observed FPR ≤ certified α on tiers 1 and 3, (iv) generalisation
+      on tier 2 vs tier 1 (expect a drop — report it, don't hide it).
+      AC: a short RESULTS_SUMMARY.md stating each claim with its number AND its bootstrap CI;
+      negative or inconclusive results are recorded, not hidden. Include the scoping statement
+      that DataSentinel / Attention Tracker were cited but not reimplemented (T4 constraints).
 
 ## Phase 8 — Optional extensions (only after Phase 7 is green)
 
@@ -201,12 +252,16 @@ fit the decision layer, push artefacts back; notebook 03 pulls the fitted artefa
 | Block | Phases | Est. focused days |
 |---|---|---|
 | Core (must-have) | 0–5 | 5.5–7 |
-| Baselines (load existing + eval) + final eval | 6–7 | 1.5–2.5 |
+| Baselines: existing adapter + rule-based fusion + classical + stress set + external loader | 6 | 1.5–2 |
+| Final evaluation: 3 tiers × 8 configs + bootstrap + efficiency | 7 | 2–2.5 |
 | FastAPI demo (must-have for demonstration) | 9 | 0.5–1 |
 | Extensions (optional, ordered) | 8 | 1–6 |
 
 Note: the merged/generalist baseline adapter is ALREADY TRAINED (`FT_Merged_Adapter.ipynb`), so the
-single largest GPU job in the original plan is already done — Phase 6 is now load-and-score only.
+single largest GPU job in the original plan is already done — Phase 6 trains nothing.
 
-Calendar multiplier for Colab/Kaggle session limits and life: ×~1.5.
-Cut-line if time runs short: P8.4 first, then P8.2, then P8.1; P8.3 is cheap and high-value — keep it if at all possible.
+Calendar multiplier for Kaggle session limits and life: ×~1.5.
+
+**Cut-line if time runs short (in order):** P6.4 (TF-IDF baseline) first — it is the classical floor
+and least informative. Then P8.4, P8.2, P8.1. Never cut: P7.3 (bootstrap CIs — zero GPU cost, high
+viva value), P6.5 (stress set — it is the FPR argument), or the tier-1 evaluation.

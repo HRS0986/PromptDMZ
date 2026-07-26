@@ -114,16 +114,16 @@ Design principle: the three adapters do *semantic* work (language understanding)
       # future extensions append slots here ONLY (e.g. corrected-channel probs + flag)
   ```
 - **Process:** Train and compare three fusers on the **F-split**:
-  1. **Noisy-OR:** `S = 1 − Π_i (1 − q_i · p̂_i)` with learned reliabilities `q_i ∈ [0,1]` (fit by BCE, sigmoid-parameterised q; probability-features only). Collapses to the legacy OR-gate at `q_i=1` + hard thresholds — the principled generalisation of the baseline.
+  1. **Noisy-OR:** `S = 1 − Π_i (1 − q_i · p̂_i)` with learned reliabilities `q_i ∈ [0,1]` (fit by BCE, sigmoid-parameterised q; probability-features only). At `q_i = 1` this reduces exactly to conventional rule-based (probabilistic-OR) fusion — i.e. the baseline is the constrained special case of this family, and learning the reliabilities is the contribution.
   2. **Logistic regression** (sklearn, all 7 features, standardised) — interpretable weights; expected to down-weight the noisier privilege-escalation adapter (report the weights).
   3. **MLP** (one hidden layer, 8–16 units, sklearn `MLPClassifier`, early stopping) — captures interactions (e.g. two moderate scores jointly suspicious).
 - **Output:** fused score `S(x) ∈ [0,1]`; artefacts: `fusion_<variant>.pkl`, `scaler.pkl`.
-- **Justification:** The OR-gate is a zero-parameter fusion assuming equal adapter reliability — empirically false. Learned fusion strictly generalises it (OR is representable in each family ⇒ learned fusion cannot be expressively worse). Heterogeneous features (semantic + surface-statistical) are the integration-novelty claim. All fusers are ≤ a few thousand params, CPU, seconds to train.
-- **Selection rule:** pick the variant with best validation F1 at matched FPR on F-split internal CV; carry ALL variants into the final test table (they are the ablation).
+- **Justification:** Conventional rule-based disjunctive fusion (as used by MoJE's max/average gate, WAInjectBench's OR ensemble, and layered guardrail pipelines) is zero-parameter and assumes uniform detector reliability — empirically false for these adapters. Learned fusion strictly generalises it (the rule is representable in each family ⇒ learned fusion cannot be expressively worse). Heterogeneous features (semantic + surface-statistical) are the integration-novelty claim. All fusers are ≤ a few thousand params, CPU, seconds to train.
+- **Selection rule:** pick the variant with the best **TPR@1%FPR** under F-split internal cross-validation (same metric as the headline — do NOT select on one metric and report another). Tie-break on AUROC. Carry ALL variants into the final test table; they are configs (d)/(e) of §4.2 and constitute the fusion ablation. Note that noisy-OR consumes only the 3 probability features by construction, so it appears in config (d) only, not (e).
 
 ### C8 — Conformal threshold (certified FPR)
 
-- **Input:** fused scores of **benign** examples in the **C-split** (never used for any fitting); target level α (default 0.05).
+- **Input:** fused scores of **benign** examples in the **C-split** (never used for any fitting); target level α. **Headline α = 0.01**, chosen to align with the TPR@1%FPR headline metric so both describe the same operating point; also sweep {0.01, 0.05, 0.10}.
 - **Process:** Split-conformal quantile with finite-sample correction:
   ```python
   scores = sorted(S(x) for benign x in C_split)      # n values
@@ -132,7 +132,7 @@ Design principle: the three adapters do *semantic* work (language understanding)
   ```
 - **Output:** `tau` (+ metadata: n, α); artefact `conformal.json`.
 - **Justification:** Converts an arbitrary 0.5 cut into a threshold with a distribution-free guarantee: for exchangeable benign inputs, `P(S(x) > τ̂) ≤ α` (up to O(1/n)). Upgrades the claim from "good empirical FPR" to "certified FPR bound" — qualitatively different. Costs a sort.
-- **Constraints:** need n ≥ 100–200 benign in C-split for a practically tight bound (bare minimum 1/α). Guarantee is marginal, not per-instance — one honest sentence in the thesis. Report certified α vs empirically observed test FPR side by side (they should be consistent; that plot is the payoff).
+- **Constraints:** need n ≥ 100–200 benign in C-split for a practically tight bound (bare minimum 1/α; at α=0.01 that minimum is 100, so C-split benign count is a hard gate). Report the conformal threshold alongside the empirically-tuned 1%-FPR threshold: conformal is slightly conservative (the (n+1) correction), so its observed FPR typically lands below α and its TPR slightly lower — quantify this gap explicitly as the *price of the guarantee*. Guarantee is marginal, not per-instance — one honest sentence in the thesis. Report certified α vs empirically observed test FPR side by side (they should be consistent; that plot is the payoff).
 
 ### C9 — Decision + attribution
 
@@ -175,17 +175,49 @@ Rules:
 
 ---
 
-## 4. Evaluation matrix (final test-split run)
+## 4. Evaluation protocol (final test run)
 
-Configurations (rows):
-- (a) **Merged/generalist baseline adapter** (`fyp-gemma3-1b-slm-merged-qlora`, ALREADY TRAINED, same recipe: r=16, α=16) — the specialist-vs-generalist control for the thesis hypothesis. Load and score; do not retrain.
-- (b) 3 specialists + hard OR-gate on raw `p_i > 0.5` — the legacy decision logic, re-implemented on the new scoring path.
+### 4.1 Evaluation datasets (three tiers — all scored ONCE, at Phase 7)
+
+| Tier | Set | Purpose |
+|---|---|---|
+| 1 | **UNIFIED-TEST** (union of the three per-category test splits, deduped; see §3) | Primary held-out evaluation. Mandatory but not sufficient alone — it is in-distribution. |
+| 2 | **External benchmark** — Open-Prompt-Injection (Liu et al.) preferred; deepset `prompt-injections` (HF) as lighter fallback if OPI's task structure does not map cleanly to binary | Cross-dataset generalisation. Map to binary INJECTION/BENIGN; document the mapping and any dropped task types. Nothing is fitted on it. |
+| 3 | **Benign stress set** (hand-designed, ~100–300 prompts: trigger words in innocuous contexts — e.g. "ignore the previous paragraph of this essay", security/RBAC/encoding discussions, code with `sudo`/`admin` identifiers) | Targeted FPR analysis / utility preservation. All-benign by construction; report FPR only. Author it and freeze it BEFORE seeing Phase 7 results. |
+
+Tiers 2 and 3 are scored through the identical pipeline and decision-layer artefacts as Tier 1 — no re-fitting, no re-thresholding.
+
+### 4.2 Configurations (rows)
+
+Priority order — cut from the bottom if time is short.
+
+- (a) **Merged/generalist baseline adapter** (`fyp-gemma3-1b-slm-merged-qlora`, ALREADY TRAINED, r=16, α=16) — the specialist-vs-generalist control the thesis hypothesis lives or dies on. Load and score; never retrain.
+- (b) 3 specialists + **conventional rule-based fusion** (the literature-standard disjunctive baseline; cite MoJE, WAInjectBench). Report in two forms:
+  - **(b1) probabilistic-OR (primary):** `S = 1 − Π_i (1 − p_i)` on uncalibrated probabilities — natively continuous, so it has its own ROC curve, and is exactly the `q_i = 1` constrained case of the noisy-OR fuser.
+  - **(b2) hard disjunctive rule (secondary):** flag if any `p_i > τ`, with a **shared τ swept 0→1** to trace its ROC curve. A fixed `τ = 0.5` is a single ROC point and CANNOT be compared at a matched FPR — never report it as the baseline's TPR@1%FPR.
+  - **(b3) strong variant (optional):** per-adapter thresholds `(τ₁, τ₂, τ₃)` optimised on F-split. Beating a tuned baseline is a much stronger result than beating a naive one.
 - (c) 3 specialists + learned fusion, **uncalibrated** (ablates calibration).
-- (d) 3 specialists + **calibrated** learned fusion (each variant: noisy-OR / LR / MLP), probs-only.
+- (d) 3 specialists + **calibrated** learned fusion (variants: noisy-OR / LR / MLP), probs-only.
 - (e) (d) + tokenizer stats (full feature vector) — ablates the stats channel.
-- (f) best of (d/e) + conformal threshold — the headline system.
+- (f) best of (d/e) + **conformal threshold** — the headline system.
+- (g) **Perplexity + LightGBM** baseline (Alon & Kamfonas): GPT-2 window perplexity features → LightGBM, fitted on F-split only. Cheap, citable, non-neural-detector floor.
+- (h) **TF-IDF + Random Forest / logistic regression** baseline (per Shaheer et al.) — the classical floor. **Cut this first if time is short.**
 
-Metrics (columns): Accuracy, Precision, Recall, F1, FPR, AUROC, ECE (pre/post calibration, per adapter), per-category recall, cross-category leakage matrix (which adapter fires on which attack family), parse-failure rate of legacy pipeline vs 0 for new (motivates C5), latency ms/prompt (batched vs sequential; report both), peak VRAM (`torch.cuda.max_memory_allocated`), adapter + decision-layer parameter counts.
+**Explicitly out of scope:** faithful reimplementation of DataSentinel and Attention Tracker. Cite them, compare reported numbers qualitatively, and state that reproduction was out of scope under T4 constraints. This is a legitimate scoping statement — do not attempt partial reimplementations.
+
+### 4.3 Metrics (columns)
+
+**Primary detection metrics** — Precision, Recall, F1, AUROC, and **TPR @ 1% FPR as the headline deployability number** (the low-FPR operating point is where a real detector is judged; it is also where rule-based fusion degrades most (compounded false positives) and calibrated fusion gains most). Report **FPR on benign prompts separately** (utility preservation). **Accuracy is NOT a headline metric** — classes are imbalanced and it conceals the interesting behaviour; report it only in the appendix table if at all.
+
+**Calibration metrics** — ECE (10-bin) and reliability diagrams per adapter, **before vs after** temperature scaling; plus **empirical coverage of the conformal threshold**: does the certified FPR bound α actually hold on UNIFIED-TEST and on the stress set? Use `sklearn.calibration` + a simple 10-bin ECE; no extra dependencies.
+
+**Operating-point selection discipline** — ROC curves and AUROC are threshold-free and computed on test. But the *specific* operating point (the threshold achieving 1% FPR) must be selected on F- or C-split and then applied to test; selecting it on test is tuning on test.
+
+**Statistical rigour** — **stratified bootstrap confidence intervals (1,000 resamples of the test predictions)** on F1 and TPR@1%FPR for every configuration; 3 seeds if compute allows. Two requirements: (i) resample the benign and attack pools **separately**, each to its original size, so the FPR denominator is fixed; (ii) **recompute the 1%-FPR threshold inside each replicate** — the threshold's instability is the dominant variance source for this metric, and holding it fixed understates the CI. Bootstrap costs zero GPU time (resamples saved predictions) and is what lets the thesis state whether the specialist-vs-generalist gap is significant rather than noise. Report CIs alongside every headline number.
+
+**Error analysis** — per-category recall, cross-category leakage matrix (which adapter fires on which attack family), legacy parse-failure rate vs 0 for the new scoring path (motivates C5).
+
+**Efficiency** — peak VRAM (`torch.cuda.max_memory_allocated`), **median and p95** latency per prompt, batched-vs-sequential adapter throughput, adapter + decision-layer parameter counts. All measured on the same T4 in one session so they are internally comparable.
 
 ---
 
@@ -220,8 +252,13 @@ src/
   pipeline.py         # C9: end-to-end detect(prompt) using persisted artefacts
   eval/
     splits.py         # T/F/C partition + overlap hashing + split manifests
-    metrics.py        # all §4 metrics incl. leakage matrix, latency/VRAM harness
-    run_eval.py       # the single-pass test evaluation producing the §4 table
+    metrics.py        # §4.3 metrics: P/R/F1/AUROC, TPR@1%FPR, ECE, leakage matrix, latency/VRAM
+    bootstrap.py      # 1,000-resample CIs on F1 and TPR@1%FPR (CPU, no GPU)
+    baselines.py      # configs (g) perplexity+LightGBM, (h) TF-IDF+RF/LR
+    external.py       # tier-2 benchmark loading + binary mapping (Open-Prompt-Injection / deepset)
+    run_eval.py       # the single-pass test evaluation producing the §4 tables
+data/
+  benign_stress_set.jsonl   # tier-3 hand-authored FPR probe; frozen before Phase 7
   serve/
     app.py            # FastAPI demo: load model+adapters+artefacts once at startup, POST /detect
     schemas.py        # DetectRequest / DetectResponse pydantic models

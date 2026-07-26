@@ -11,8 +11,12 @@ by a small **learned fusion** layer, and a **conformal threshold** gives a certi
 bound. Output is binary: `INJECTION` or `BENIGN`, with per-category attribution.
 
 The novelty is the *integration*, not any single mechanism: calibrated learned fusion over
-specialist adapters on a shared quantized backbone, evaluated against an OR-gate baseline and a
-single merged/generalist adapter, under T4 VRAM constraints.
+specialist adapters on a shared quantized backbone, evaluated against conventional rule-based
+(disjunctive) fusion and a single merged/generalist adapter, under T4 VRAM constraints.
+
+Terminology: never call the rule-based baseline "the previous architecture" — it is the
+literature-standard disjunctive fusion approach (MoJE, WAInjectBench), and formally the `q_i = 1`
+constrained case of the noisy-OR fuser.
 
 ## Read these first (authoritative specs)
 
@@ -80,6 +84,13 @@ Treat both as the source of truth. If a request conflicts with them, say so and 
    appending slots + refitting.
 7. **Standardise on the 4-bit backbone everywhere** (`unsloth/gemma-3-1b-it-unsloth-bnb-4bit`). The
    legacy fp16 evaluation numbers are not comparable to new results; do not mix them.
+8. **Evaluation rules.** The headline metric is **TPR @ 1% FPR**, not accuracy — accuracy is
+   appendix-only (imbalanced classes). Every headline number carries a **bootstrap 95% CI**
+   (1,000 resamples of saved predictions; CPU, no re-scoring). All three test tiers (UNIFIED-TEST,
+   external benchmark, benign stress set) are scored with the decision-layer artefacts applied
+   **read-only** — never re-fit or re-threshold on them. The benign stress set is authored and
+   frozen BEFORE any Phase 7 results are seen. Do NOT attempt to reimplement DataSentinel or
+   Attention Tracker — they are cited and compared qualitatively only.
 
 ## Environment & package management (uv)
 
