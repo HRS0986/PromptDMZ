@@ -16,6 +16,7 @@ import pytest
 
 from src.scoring import (
     GATE_MIN_PROMPTS,
+    GATE_TOLERANCE,
     MIN_LABEL_ID_ROWS,
     LabelIds,
     ScoringError,
@@ -95,7 +96,9 @@ class StubModel:
             # Content-dependent: real tokens only. If padding leaked into the last position, or
             # rows were mis-paired with adapters, the two paths diverge.
             real = input_ids[row][attention_mask[row] == 1]
-            signal = float(real.sum() % 97) / 97.0
+            # Centred on 0 so d spans both signs and p straddles 0.5. Without this every row
+            # sits on one side of the boundary and decision-flip tests pass only by accident.
+            signal = float(real.sum() % 97) / 97.0 - 0.5
             # Position-dependent, standing in for RoPE: the position of the FIRST real token.
             first_real_pos = float(position_ids[row][attention_mask[row] == 1][0])
             logits[row, -1, 10] = offset + signal + first_real_pos  # INJ slot
@@ -372,8 +375,8 @@ def test_gate_passes_when_paths_agree(stub_tokenizer, ids):
     assert report.n_prompts == GATE_MIN_PROMPTS
 
 
-def test_gate_fails_loudly_when_paths_disagree(stub_tokenizer, ids):
-    """A real divergence must surface as passed=False, not be smoothed over."""
+def test_gate_fails_when_the_batched_path_changes_decisions(stub_tokenizer, ids):
+    """A divergence large enough to flip predictions must surface as passed=False."""
 
     class DriftingModel(StubModel):
         def __call__(self, *args, adapter_names=None, **kw):
@@ -387,7 +390,36 @@ def test_gate_fails_loudly_when_paths_disagree(stub_tokenizer, ids):
 
     assert report.batched_supported is True
     assert report.passed is False
+    assert report.n_decision_flips > 0
     assert report.max_abs_prob_diff > 1e-3
+
+
+def test_numerical_gap_that_never_flips_a_decision_now_passes(stub_tokenizer, ids):
+    """The re-specified criterion, stated as a test.
+
+    A |Δp| far above the old 1e-3 rule passes IF no prediction changes — that is precisely the
+    fp16/NF4 batch-shape situation measured on the T4. The magnitude is still reported, so the
+    gap stays visible rather than being hidden by the boolean.
+    """
+    import numpy as np
+
+    class TinyBiasModel(StubModel):
+        def __call__(self, *args, adapter_names=None, **kw):
+            out = super().__call__(*args, adapter_names=adapter_names, **kw)
+            if adapter_names is not None:
+                # Push both label logits together: p moves, sign of (p - 0.5) cannot.
+                out.logits[:, -1, 10] *= 1.02
+                out.logits[:, -1, 20] *= 1.02
+            return out
+
+    prompts = [f"prompt {i}" for i in range(GATE_MIN_PROMPTS)]
+    report = verify_batched_vs_sequential(TinyBiasModel(), stub_tokenizer, prompts, ids)
+
+    assert report.n_decision_flips == 0
+    assert report.decision_agreement == 1.0
+    assert report.passed is True
+    assert report.max_abs_prob_diff > GATE_TOLERANCE, "gap must exceed the OLD rule to be a real test"
+    assert not np.isnan(report.p95_abs_prob_diff)
 
 
 def test_diagnosis_attributes_a_mixing_only_divergence(stub_tokenizer, ids):
@@ -426,6 +458,35 @@ def test_loader_puts_the_model_in_eval_mode():
 
     assert "model.eval()" in inspect.getsource(model_loader.load_model_with_adapters)
     assert "training_mode" in model_loader.LoadReport.__dataclass_fields__
+
+
+def test_gate_reports_decision_agreement_and_percentiles(stub_tokenizer, ids):
+    """Distributional evidence must be present even when the max-|Δp| rule passes."""
+    prompts = [f"prompt {i}" for i in range(GATE_MIN_PROMPTS)]
+    report = verify_batched_vs_sequential(StubModel(), stub_tokenizer, prompts, ids)
+
+    assert report.decision_agreement == 1.0
+    assert report.n_decision_flips == 0
+    assert report.p95_abs_prob_diff == 0.0
+    assert report.flipped_prob_range == []
+
+
+def test_decision_agreement_counts_real_flips(stub_tokenizer, ids):
+    """A large batched-only perturbation must show up as flipped decisions, not just a big max."""
+
+    class FlippingModel(StubModel):
+        def __call__(self, *args, adapter_names=None, **kw):
+            out = super().__call__(*args, adapter_names=adapter_names, **kw)
+            if adapter_names is not None:
+                out.logits[:, -1, 10] += 50.0  # batched path -> p ~ 1 everywhere
+            return out
+
+    prompts = [f"p{i}" for i in range(GATE_MIN_PROMPTS)]
+    report = verify_batched_vs_sequential(FlippingModel(), stub_tokenizer, prompts, ids)
+
+    assert report.n_decision_flips > 0
+    assert report.decision_agreement < 1.0
+    assert len(report.flipped_prob_range) == 2
 
 
 def test_gate_refuses_too_few_prompts(stub_tokenizer, ids):

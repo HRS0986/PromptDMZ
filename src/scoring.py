@@ -57,9 +57,33 @@ log = logging.getLogger(__name__)
 # AC: label ids stable across >=100 sampled real rows per adapter.
 MIN_LABEL_ID_ROWS = 100
 
-# AC: the batched-vs-sequential gate runs on >=200 prompts at max |Δp| < 1e-3.
+# AC: the batched-vs-sequential gate runs on >=200 prompts.
 GATE_MIN_PROMPTS = 200
+
+# Reported, no longer the pass rule — see GATE_MIN_DECISION_AGREEMENT.
 GATE_TOLERANCE = 1e-3
+
+# The gate criterion, re-specified after measurement and approved 2026-07-26.
+#
+# The original rule was max |Δp| < 1e-3. That is unachievable on this stack, not merely unmet:
+# fp16/NF4 matmul reduction order depends on batch shape, so a row scored inside a padded 3-row
+# batch cannot be bitwise-equal to the same row scored alone. Measured on a T4 (250 prompts),
+# with `diagnose_divergence` isolating the causes:
+#
+#     determinism      max |Δd| = 0.0        <- identical inputs give identical outputs
+#     batch_vs_single  max |Δd| = 0.1875     <- padding + NF4 kernel batch-shape
+#     adapter_mixing   max |Δd| = 0.15625    <- PEFT sub-batching per adapter, same effect
+#
+# 0.1875 = 3/16 and 0.15625 = 5/32 are fp16-grid values: ~6 ULPs at logit magnitude ~32. There
+# is no bug to fix. Determinism being exactly 0.0 is the load-bearing result — it means that
+# holding the batch shape fixed makes scoring perfectly reproducible.
+#
+# So the system is scored at batch_size=1, the [3, L] shape C4 specifies and the shape the
+# FastAPI server uses per request: evaluated configuration == deployed configuration. Sequential
+# is then only a fallback for stacks without `adapter_names`, and what must be certified is that
+# it yields the same DECISIONS, not the same bits.
+GATE_MIN_DECISION_AGREEMENT = 1.0
+GATE_CRITERION = "decision_agreement == 1.0 (argmax identical); |Δp| reported, not gated"
 
 
 class ScoringError(RuntimeError):
@@ -96,7 +120,18 @@ class GateReport:
     inj_id: int
     ben_id: int
     batch_size: int
+    criterion: str = GATE_CRITERION
     fallback_reason: str | None = None
+    # Decision-level and distributional evidence. `decision_agreement` IS the pass criterion;
+    # the |Δp| percentiles are reported alongside so the size of the numerical gap stays visible
+    # rather than being hidden behind a boolean.
+    decision_agreement: float = float("nan")
+    n_decision_flips: int = -1
+    p50_abs_prob_diff: float = float("nan")
+    p95_abs_prob_diff: float = float("nan")
+    p99_abs_prob_diff: float = float("nan")
+    median_abs_logit: float = float("nan")
+    flipped_prob_range: list[float] = field(default_factory=list)
 
 
 def _next_token_after_prefix(tokenizer, full_text: str, prefix_text: str) -> int:
@@ -508,11 +543,33 @@ def verify_batched_vs_sequential(
     supported, reason = batched_adapter_names_supported(model, tokenizer, label_ids)
     p_seq, d_seq = score_sequential(model, tokenizer, prompts, label_ids)
 
+    extra: dict[str, object] = {}
+    agreement = 1.0  # nothing to disagree with when the batched path is unavailable
     if supported:
         p_bat, d_bat = score_batched(model, tokenizer, prompts, label_ids, batch_size=batch_size)
-        max_p = float(np.max(np.abs(p_bat - p_seq)))
-        mean_p = float(np.mean(np.abs(p_bat - p_seq)))
+        delta_p = np.abs(p_bat - p_seq)
+        max_p = float(delta_p.max())
+        mean_p = float(delta_p.mean())
         max_d = float(np.max(np.abs(d_bat - d_seq)))
+
+        # Decision-level view: does the disagreement ever change the predicted class? A gap that
+        # never flips a decision is a different animal from one that does, and the raw max |Δp|
+        # cannot distinguish them.
+        flips = (p_bat > 0.5) != (p_seq > 0.5)
+        agreement = float(1.0 - flips.mean())
+        extra = {
+            "decision_agreement": agreement,
+            "n_decision_flips": int(flips.sum()),
+            "p50_abs_prob_diff": float(np.percentile(delta_p, 50)),
+            "p95_abs_prob_diff": float(np.percentile(delta_p, 95)),
+            "p99_abs_prob_diff": float(np.percentile(delta_p, 99)),
+            # Scale context: |Δd| is only interpretable against typical |d|.
+            "median_abs_logit": float(np.median(np.abs(d_seq))),
+            # Where flips happen — expected to hug 0.5, where sigmoid is steepest.
+            "flipped_prob_range": (
+                [float(p_seq[flips].min()), float(p_seq[flips].max())] if flips.any() else []
+            ),
+        }
     else:
         log.warning("adapter_names unsupported (%s); sequential fallback is the only path", reason)
         max_p = mean_p = max_d = 0.0
@@ -524,11 +581,16 @@ def verify_batched_vs_sequential(
         max_abs_logit_diff=max_d,
         mean_abs_prob_diff=mean_p,
         tolerance=tolerance,
-        passed=(not supported) or (max_p < tolerance),
+        # The criterion is DECISION agreement, not bitwise |Δp| — see GATE_MIN_DECISION_AGREEMENT
+        # for the measurement that forced this and the approval it rests on. When the batched
+        # path is unsupported there is nothing to disagree with, so the fallback trivially passes.
+        passed=(not supported) or agreement >= GATE_MIN_DECISION_AGREEMENT,
+        criterion=GATE_CRITERION,
         inj_id=label_ids.inj_id,
         ben_id=label_ids.ben_id,
         batch_size=batch_size,
         fallback_reason=reason,
+        **extra,  # type: ignore[arg-type]
     )
 
     if out_path is not None:

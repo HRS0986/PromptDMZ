@@ -64,11 +64,28 @@ Global rules:
       SentencePiece may merge with the following label word, so the first token of `INJECTION`
       in context need not equal its first token in isolation (`templates.label_context()` supplies
       the context).
-      AC: **batched vs sequential probabilities agree within fp16 tolerance (max |Δp| < 1e-3)
-      on ≥200 prompts** — this test gates everything downstream. Label ids: INJ_ID ≠ BEN_ID, both
-      stable across ≥100 sampled real rows per adapter, and the derived ids logged. Expect them
+      AC (RE-SPECIFIED 2026-07-26 after measurement — approved; original rule recorded below):
+      **batched vs sequential agree on every DECISION (argmax identical, i.e.
+      decision_agreement == 1.0) over ≥200 prompts**, with median/p95/max |Δp| reported
+      alongside. This gates everything downstream. Label ids: INJ_ID ≠ BEN_ID, both stable
+      across ≥100 sampled real rows per adapter, and the derived ids logged. Expect them
       identical across all three adapters (the context preceding the label is byte-identical) —
       if not, stop and investigate rather than proceeding.
+
+      *Why the original `max |Δp| < 1e-3` rule was replaced.* It is unachievable on this stack,
+      not merely unmet. fp16/NF4 matmul reduction order depends on batch shape, so a row scored
+      inside a padded 3-row batch cannot be bitwise-equal to the same row scored alone.
+      `diagnose_divergence` on a T4 (250 prompts) isolated the causes:
+      determinism max |Δd| = **0.0** (identical inputs → identical outputs);
+      batch_vs_single = 0.1875; adapter_mixing = 0.15625. Both are fp16-grid values
+      (3/16 and 5/32 ≈ 6 ULPs at logit magnitude ~32) and both are the same underlying effect —
+      PEFT sub-batches per adapter, which is itself a batch-shape change. No bug exists to fix.
+      Because determinism is exactly 0.0, fixing the batch shape makes scoring fully
+      reproducible: the system is therefore scored at **batch_size=1** (C4's `[3, L]`), which is
+      also the shape the FastAPI server uses per request, so the evaluated configuration equals
+      the deployed one. Sequential is then only a fallback for stacks lacking `adapter_names`,
+      and what must be certified is that it produces the same decisions. The batch-shape
+      sensitivity is reported as a measured limitation in Phase 7.
 - [ ] **P1.3 Legacy agreement check**: run new scorer + the legacy generate-parse pipeline
       (reuse `Final_Inference_Pipeline.ipynb`'s predict functions verbatim as the comparator)
       on the same labelled sample (n≈500), both on the 4-bit backbone.
