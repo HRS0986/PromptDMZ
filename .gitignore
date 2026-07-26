@@ -5,6 +5,7 @@ build/
 dist/
 wheels/
 *.egg-info
+.pytest_cache/
 
 # Virtual environments
 .venv
@@ -15,3 +16,11 @@ wheels/
 
 # env files
 .env
+
+# Artefacts — scores/manifests/fitted decision layer. The durable store is the private HF
+# artefact dataset repo (hirushafernando/slm-shield-artifacts), not git; this is local scratch.
+artifacts/*
+!artifacts/.gitkeep
+
+# data/ is NOT ignored: data/benign_stress_set.jsonl (P6.5) must be committed and frozen
+# before Phase 7 results are seen.
