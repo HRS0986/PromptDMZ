@@ -13,7 +13,7 @@ Global rules:
 
 ## Phase 0 — Foundations (0.5–1 day)
 
-- [ ] **P0.1 Repo scaffold + uv**: create `src/` layout per ARCHITECTURE §6; init `uv`
+- [x] **P0.1 Repo scaffold + uv**: create `src/` layout per ARCHITECTURE §6; init `uv`
       (`uv init`), declare deps in `pyproject.toml` — behaviour-critical libs pinned to the
       versions from the working notebooks (transformers==4.53.1, unsloth==2025.7.2, plus peft,
       bitsandbytes, trl, accelerate at their known-good versions), `torch` left loose so platform

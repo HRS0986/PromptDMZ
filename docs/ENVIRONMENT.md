@@ -35,6 +35,29 @@ training notebooks used `pip install -U` (unpinned), so the banners are the only
 | `bitsandbytes` | `==0.50.0` | Working local environment (`Final_Inference_Pipeline.ipynb` asked only for `>=0.46.1`) |
 | `accelerate` | `==1.14.0` | Working local environment; named behaviour-critical by TASKS.md P0.1 |
 
+## Observed torch versions — training vs inference
+
+The loose `torch` pin means the three environments run genuinely different torch builds. Verified
+on a live Kaggle session (2026-07-26, P0.1 AC 2):
+
+| Environment | torch | Role |
+|---|---|---|
+| Training (both notebooks, RTX 3060 Laptop) | **2.6.0+cu124** | produced the frozen adapter weights |
+| Kaggle T4 (notebooks 01-03) | **2.10.0+cu128** | all GPU scoring |
+| Local (uv, Windows) | 2.6.0+cu124 | decision layer, tests, serve |
+
+So GPU scoring runs four minor versions and one CUDA minor ahead of training. This is by
+design — the whole point of the loose pin is that the platform's CUDA build is kept rather than
+rebuilt — and it is not a threat to validity: the adapters are frozen weights, nothing re-runs
+training, and the thesis claims depend only on inference being *self-consistent* across
+configurations, which it is (every configuration is scored on the same T4 session stack).
+
+**State this in the thesis environment table rather than relying on a test to cover it, because
+no gate actually does.** P1.2 compares batched vs sequential *within* one environment; P1.3
+compares the new scoring path vs the legacy generate-parse path *within* one environment.
+Neither compares Kaggle-torch-2.10 numerics against training-torch-2.6 numerics — that
+comparison is not made anywhere in the build, and does not need to be.
+
 ## Known discrepancy — transformers 4.53.1 vs 4.54.1
 
 The two training runs did **not** use the same transformers version:

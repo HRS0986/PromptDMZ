@@ -24,3 +24,5 @@ artifacts/*
 
 # data/ is NOT ignored: data/benign_stress_set.jsonl (P6.5) must be committed and frozen
 # before Phase 7 results are seen.
+
+.history
