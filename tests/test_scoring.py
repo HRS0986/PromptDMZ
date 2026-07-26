@@ -56,6 +56,7 @@ class StubModel:
     def __init__(self, vocab: int = 300):
         self.vocab = vocab
         self.device = "cpu"
+        self.training = False  # the loader calls model.eval(); mirror that
         self.active = ADAPTERS[0]
         self.calls: list[dict] = []
         self.supports_adapter_names = True
@@ -387,6 +388,44 @@ def test_gate_fails_loudly_when_paths_disagree(stub_tokenizer, ids):
     assert report.batched_supported is True
     assert report.passed is False
     assert report.max_abs_prob_diff > 1e-3
+
+
+def test_diagnosis_attributes_a_mixing_only_divergence(stub_tokenizer, ids):
+    """A model that only misbehaves when serving multiple adapters must be named as such."""
+    from src.scoring import diagnose_divergence
+
+    class MixingOnlyModel(StubModel):
+        def __call__(self, *args, adapter_names=None, **kw):
+            out = super().__call__(*args, adapter_names=adapter_names, **kw)
+            if adapter_names is not None and len(set(adapter_names)) > 1:
+                out.logits[:, -1, 10] += 3.0
+            return out
+
+    diag = diagnose_divergence(MixingOnlyModel(), stub_tokenizer, ["a", "b"], ids)
+
+    assert diag.dominant_cause == "adapter_mixing"
+    assert diag.adapter_mixing_max_abs_d > 1.0
+    assert diag.determinism_max_abs_d == 0.0
+
+
+def test_diagnosis_reports_a_clean_model_as_deterministic(stub_tokenizer, ids):
+    from src.scoring import diagnose_divergence
+
+    diag = diagnose_divergence(StubModel(), stub_tokenizer, ["a", "b"], ids)
+
+    assert diag.determinism_max_abs_d == 0.0
+    assert diag.adapter_mixing_max_abs_d == 0.0
+    assert diag.batch_vs_single_max_abs_d == 0.0
+
+
+def test_loader_puts_the_model_in_eval_mode():
+    """LoRA dropout in training mode would make every forward nondeterministic."""
+    import inspect
+
+    from src import model_loader
+
+    assert "model.eval()" in inspect.getsource(model_loader.load_model_with_adapters)
+    assert "training_mode" in model_loader.LoadReport.__dataclass_fields__
 
 
 def test_gate_refuses_too_few_prompts(stub_tokenizer, ids):

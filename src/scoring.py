@@ -387,6 +387,102 @@ def batched_adapter_names_supported(model, tokenizer, label_ids: LabelIds) -> tu
     return True, None
 
 
+@dataclass
+class DivergenceDiagnosis:
+    """Attributes a batched-vs-sequential gap to its cause.
+
+    Three effects are confounded in the raw gate number. This isolates them by holding the
+    batch rows fixed and varying only one thing at a time, all on the same `(prompt, adapter)`
+    quantity `d = z_inj - z_ben`:
+
+      * `determinism`      — the same single-row call twice. The noise floor; anything below
+                             this is not attributable to batching at all.
+      * `batch_vs_single`  — one row alone vs the SAME row inside a padded 3-row batch, with
+                             only its own adapter active. Isolates padding + batch-shape kernel
+                             effects (bitsandbytes NF4 uses different gemm paths by batch size).
+      * `adapter_mixing`   — the same padded 3-row batch, `adapter_names=[a,a,a]` vs `[a,b,c]`,
+                             comparing row i either way. Identical rows, identical padding,
+                             identical batch size; the ONLY difference is whether PEFT is
+                             serving multiple adapters in one pass. This is the one that decides
+                             whether C4's batched design is numerically sound.
+    """
+
+    n_prompts: int
+    determinism_max_abs_d: float
+    batch_vs_single_max_abs_d: float
+    adapter_mixing_max_abs_d: float
+    determinism_mean_abs_d: float
+    batch_vs_single_mean_abs_d: float
+    adapter_mixing_mean_abs_d: float
+    dominant_cause: str
+    model_training_mode: bool
+
+
+def _d_for_batch(model, tokenizer, prompts, adapters, label_ids, adapter_names):
+    """`d` for every row of one padded batch, under a given adapter_names assignment."""
+    batch = build_batch(tokenizer, prompts, adapters).to(model.device)
+    logits = _forward(model, batch, adapter_names=adapter_names)
+    _, d = logits_to_prob(last_position_logits(logits, batch["attention_mask"]), *label_ids.as_tuple())
+    return d.float().cpu().numpy()
+
+
+def diagnose_divergence(
+    model,
+    tokenizer,
+    prompts: list[str],
+    label_ids: LabelIds,
+    adapters: tuple[str, ...] = ADAPTERS,
+) -> DivergenceDiagnosis:
+    """Decompose the P1.2 gap into determinism / batch-shape / adapter-mixing components.
+
+    Run this when the gate fails. It changes nothing and fits nothing — it only measures.
+    """
+    import numpy as np
+
+    det, batch_single, mixing = [], [], []
+
+    for prompt in prompts:
+        rows = [prompt] * len(adapters)
+        row_adapters = list(adapters)
+
+        # Everything varies: the batched path as the gate runs it.
+        d_mixed = _d_for_batch(model, tokenizer, rows, row_adapters, label_ids, row_adapters)
+
+        for i, adapter in enumerate(adapters):
+            # Same rows, same padding, same batch size — only one adapter served.
+            d_same = _d_for_batch(
+                model, tokenizer, rows, row_adapters, label_ids, [adapter] * len(adapters)
+            )[i]
+            mixing.append(abs(float(d_mixed[i]) - float(d_same)))
+
+            # The identical (prompt, adapter) quantity, alone and unpadded.
+            model.set_adapter(adapter)
+            d_seq = _d_for_batch(model, tokenizer, [prompt], [adapter], label_ids, None)[0]
+            d_seq2 = _d_for_batch(model, tokenizer, [prompt], [adapter], label_ids, None)[0]
+
+            batch_single.append(abs(float(d_same) - float(d_seq)))
+            det.append(abs(float(d_seq) - float(d_seq2)))
+
+    det_a, bs_a, mix_a = np.array(det), np.array(batch_single), np.array(mixing)
+    causes = {
+        "adapter_mixing": float(mix_a.max()),
+        "batch_vs_single": float(bs_a.max()),
+        "determinism": float(det_a.max()),
+    }
+
+    return DivergenceDiagnosis(
+        n_prompts=len(prompts),
+        determinism_max_abs_d=float(det_a.max()),
+        batch_vs_single_max_abs_d=float(bs_a.max()),
+        adapter_mixing_max_abs_d=float(mix_a.max()),
+        determinism_mean_abs_d=float(det_a.mean()),
+        batch_vs_single_mean_abs_d=float(bs_a.mean()),
+        adapter_mixing_mean_abs_d=float(mix_a.mean()),
+        dominant_cause=max(causes, key=lambda k: causes[k]),
+        model_training_mode=bool(model.training),
+    )
+
+
 def verify_batched_vs_sequential(
     model,
     tokenizer,

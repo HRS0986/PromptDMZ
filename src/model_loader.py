@@ -84,6 +84,7 @@ class LoadReport:
     load_seconds: float
     smoke_inference_ok: bool
     smoke_logits_shape: list[int]
+    training_mode: bool
     device: str
     gpu_name: str
     library_versions: dict[str, str] = field(default_factory=dict)
@@ -226,6 +227,10 @@ def load_model_with_adapters(hf_token: str | None = None):
     model = attach_adapters(base_model, hf_token)
     elapsed = time.perf_counter() - started
 
+    # Explicit, not assumed: in training mode LoRA dropout is live, which makes every forward
+    # pass nondeterministic and would surface as a batched-vs-sequential disagreement in P1.2.
+    model.eval()
+
     names = loaded_adapter_names(model)
     if names != sorted(ADAPTERS):
         raise ModelLoadError(
@@ -262,6 +267,7 @@ def report_load(model, tokenizer, out_path: Path | str | None = None) -> LoadRep
         load_seconds=round(getattr(model, "_p11_load_seconds", float("nan")), 2),
         smoke_inference_ok=ok,
         smoke_logits_shape=shape,
+        training_mode=bool(model.training),
         device=str(model.device),
         gpu_name=torch.cuda.get_device_name(0),
         library_versions=_library_versions(),
